@@ -1,0 +1,382 @@
+---
+title: "DATA PROCESSING R SCRIPT"
+author: "Ceragene M, Bushra N, Douthat T*"
+sub title: Linking Hydrodynamic Flood Risk Modeling to Scenario Planning and Local
+  Fiscal Impact Analysis
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+version date: April 2025
+github: ''
+reference: ''
+---
+
+### General Description:
+
+We use private assessment Dataset from a third-party (ATTOM <https://www.attomdata.com/>) that provide us information for any property in our areas of study located in three States Alabama (AL), Louisiana (LA) and Mississippi (Ms) in the United States.
+
+The Dataset contains:
+
+**1. Recorder Data**- that includes all sale transactions between sellers and buyers, furthermore relevant information such as: details on each transaction and transfer document, property location, personal information on grantors and grantees, property use group and finally mortgage information.
+
+**2. Tax Assessor Data**- contains information about assessed and collected property taxes by local tax assessors in different counties across those three States.This dataset has necessary information such as building characteristics, (year built, number of bathrooms, bedrooms, stories, parking slot and pool area), owner information such as names, addresses. It also has geo-location of each property, amount and date the prior and last transaction.
+
+Finally, we will join those two datasets to have our input data.
+
+Step 1.
+
+1.1.- Install Necessary Libraries.
+
+```{r 1, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(vroom)
+library(dplyr)
+library(tidyr)
+library(fs)
+library(readr)  
+library(data.table)
+library(Hmisc)
+library(zip)      
+library(tools)
+library(stringr)
+
+```
+
+1.2.- Read Each Zip File and Generate a Combined File.
+
+We created a script that allows to read several zip file on one directory and finally to save a combined txt file.
+
+```{r 2, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+# Define the main folder path
+main_folder <- "C:/Users/mcerag1/OneDrive - Louisiana State University/Desktop/HEDONIC/HEDONIC/SALES_DATA_AL_LA_MS/RECORDER"
+
+# Function to process a single zip file and load its content into the global environment
+process_zip_to_env <- function(zip_path) {
+  temp_dir <- tempdir() # Temporary directory to extract contents
+  unzip(zip_path, exdir = temp_dir) # Unzip the file
+  
+  # Identify .txt files inside the zip
+  txt_files <- list.files(temp_dir, pattern = "\\.txt$", full.names = TRUE)
+  
+  # Check if there are any .txt files
+  if (length(txt_files) > 0) {
+    for (txt_file in txt_files) {
+      # Read the .txt file
+      table_data <- read_delim(txt_file, delim = "\t", show_col_types = FALSE)
+      
+      # Append the data frame to a global list
+      data_list[[length(data_list) + 1]] <<- table_data
+    }
+  }
+  
+  # Cleanup temporary files
+  unlink(temp_dir, recursive = TRUE)
+}
+
+# Initialize an empty list to store datasets
+data_list <- list()
+
+# List all zip files in the main folder and subfolders
+zip_files <- list.files(main_folder, pattern = "\\.zip$", full.names = TRUE, recursive = TRUE)
+
+# Process each zip file and load the tables into the list
+lapply(zip_files, process_zip_to_env)
+
+# Combine all datasets into one
+combined_recorder <- rbind(data_list)
+
+# Save the combined dataset as a .txt file
+
+write.table(combined_recorder, file = "combined_recorder.txt", sep = "\t", row.names = FALSE, col.names = TRUE)
+
+# Print a success message
+cat("All datasets have been combined and saved to:", main_folder)
+
+```
+
+1.3.- Read the dataset in chunks from directory.
+
+```{r message=FALSE, warning=FALSE}
+
+# Read data in chunks
+combined_recorder <- fread("C:/Users/mcerag1/OneDrive - Louisiana State University/Desktop/HEDONIC/HEDONIC/combined_recorder.txt", sep = "\t", header = TRUE)
+
+```
+
+1.4.- Inspect Dataset of Study Area.
+
+The process of examining data to assess its quality, identify potential issues, and ensure it's suitable for analysis or use. It involves reviewing structure, content, and integrity to prepare data for further processing.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+# Display the first few rows of the data frame
+head(combined_recorder)
+
+# Verify the number of rows and columns
+cat("Number of rows:", nrow(combined_recorder), "\n")
+cat("Number of columns:", ncol(combined_recorder), "\n")
+
+# Check missing values in all dataset
+colSums(is.na(combined_recorder))
+
+#Exploring the dimensions of dataset. 
+dim(combined_recorder)
+
+# Displaying columns names
+variable_names <- names(combined_recorder)
+
+# See types of variables (column)
+str(combined_recorder)
+
+```
+
+1.5.- Select Necessary Columns.
+
+Due of number of columns from the dataset we need to select columns that contain relevant information based on topic (hedonic models).
+
+```{r message=FALSE, warning=FALSE}
+
+# Remove columns where more than 95% of values are NA
+combined_recorder <- combined_recorder |>
+  select(where(~ mean(is.na(.)) <= 0.95))
+
+# Verify the number of rows and columns
+cat("Number of rows:", nrow(combined_recorder), "\n")
+cat("Number of columns:", ncol(combined_recorder), "\n")
+
+```
+
+**Remark 1.5-1:** Using filter ´´´Remove columns where more than 95% of values are NA´´´ we eliminate around 22% (53 on 238) number of columns that do not contained data from the data set ´´´Recorder or Transactions´´´.
+
+1.6.- Identify arm’s-length sales.
+
+An ´´´arm's length sale´´´ in real estate refers to a transaction between parties who are unrelated and acting in their own self-interest, ensuring a fair and unbiased deal.
+
+```{r message=FALSE, warning=FALSE}
+
+# Remove rows where TransferAmount is NA or 0.
+# TransferAmount: Sale Price
+cleaned_recorder <- combined_recorder |>
+  filter(!is.na(TransferAmount) & TransferAmount != 0)
+
+# Remove rows where RecordingDate is NA or 0. 
+# RecordingDate: Recordng date on document/instrument for the latest ownership change transaction.
+cleaned_recorder <- cleaned_recorder |>
+  filter(!is.na(RecordingDate) & RecordingDate != 0)
+
+# Remove rows that are not satisfied arm's length condition (i.e. remove NA, 0, 2, 3, 4, 5 on column of ArmsLengthFlag).
+# ArmsLengthFlag: Deed representing a transfer between two otherwise unrelated or affiliated parties.
+# NULL:	Unknown or not provided
+# 0:	Non Purchase or Unknown
+# 1:	Arms Length Transaction
+# 2:	Not at Arms-Length
+# 3:	Not at Arms-Length - conveyance to Grantor's trust
+# 4:	Not at Arms-Length - interfamily transfer
+# 5:	Not at Arms-Length - dissolution
+cleaned_recorder <- cleaned_recorder |>
+  filter(ArmsLengthFlag == 1)
+
+# Remove rows where QuitclaimFlag is True or equal 1.
+# QuitclaimFlag: Indicates that the transaction is a Quit Claim.
+# 0: Not a Quitclaim Document
+# 1: Quitclaim Document
+# NULL: Unknown or not provided
+cleaned_recorder <- cleaned_recorder |>
+  filter(QuitclaimFlag != 1)
+
+# Remove rows where ForeclosureAuctionSale is True or equal 1 (bit 0 or 1).
+# ForeclosureAuctionSale: Indicates that the transaction was the result of a foreclosure auction.
+# 0: Transaction Was Not the Result of a Foreclosure Auction
+# 1: Transaction Was the Result of a Foreclosure Auction
+# NULL: Unknown or not provided
+cleaned_recorder <- cleaned_recorder |>
+  filter(ForeclosureAuctionSale != 1)
+
+# Select only Residential as property type. 
+# PropertyUseGroup: General property type description; residential, commercial, industrial, etc..
+cleaned_recorder <- cleaned_recorder |>
+  filter(PropertyUseGroup == "Residential")
+
+# Select only Individual Grantor as Grantor1InfoEntityClassification. 
+# Grantor1InfoEntityClassification: Derived field describing what type of entity the party is based on examination of the name and vesting. Sample values include individual / trust / company. 
+# Select only Individual Grantee as Grantee1InfoEntityClassification. 
+# Grantee1InfoEntityClassification: Derived field describing the type of entity based on examination of the name and vesting.
+# NULL:	Unknown or not provided
+# IND:	Individual
+# NON:	Non-Individual
+cleaned_recorder <- cleaned_recorder |>
+  filter(Grantor1InfoEntityClassification != "NON" & Grantee1InfoEntityClassification != "NON")
+
+# List of words to check (Nolte et al, 2024) provided a list of 
+words_to_check <- c('LLC', 'LTD', 'LLP', 'LLLP', 'INC', 'EST',
+                    'RET', 'INT', 'MTG', 'IRT', 'DEV', 'III', '2ND', '3RD',
+                    'BANK', 'HOLDINGS', 'TRUST', 'REVOCABLE', 'ASSOCIATION',
+                    'FAMILY', 'PROPERTIES', 'LIVING', 'COMPANY', 'ESTATE',
+                    'PROPERTIES', 'NATIONAL', 'RANCH', 'DEVELOPMENT', 'CONDO',
+                    'INVESTMENT', 'HOME', 'LOANS', 'INVESTMENTS', 'PARTNERS',
+                    'PARTNERSHIP', 'LAND', 'CORPORATION', 'LIMITED',
+                    'ENTERPRISES', 'GROUP', 'VENTURES', 'HOUSING', 'RESORT',
+                    'RESORTS', 'CORP', 'ASSN', 'ASSOCIATES', 'IRREVOCABLE',
+                    'REALTY', 'TRUSTS', 'VALLEY', 'CREEK', 'OWNERS', 'TOWNHOMES',
+                    'RIDGE', 'LODGE', 'TRAILHEAD', 'MORTGAGE', 'COUNTY')
+
+# Remove rows where any word from 'words_to_check' appears in Grantor1NameFull or Grantee1NameFull
+cleaned_recorder <- cleaned_recorder |>
+  filter(!(
+    str_detect(Grantor1NameFull, paste(words_to_check, collapse = "|")) |
+      str_detect(Grantee1NameFull, paste(words_to_check, collapse = "|"))
+  ))
+
+# Verify the number of rows and columns
+cat("Number of rows:", nrow(cleaned_recorder), "\n")
+cat("Number of columns:", ncol(cleaned_recorder), "\n")
+
+```
+
+**Remark 1.6-1:** Using filter ´´´identified arm’s-length sales´´´ that mean eliminated around 89% (11,676,809 on 13,080,714) number of rows.
+
+NOTES:
+
+1.- Quitclaim Deed: legal document that transfers property ownership from one person to another without any warranties or guarantees, often used in non-sale situations like family transfers or adding or removing a spouse from a title.
+
+2.- Warranty Deed: offer the most comprehensive protection for buyers in typical real estate transactions involving unrelated parties.They ensure that the seller has a valid title and the right to transfer the property.
+
+3.- Foreclosure Auction Sale: is a public auction where a property is sold due to the homeowner's inability to repay their mortgage. Lenders, like banks, hold a lien on the property and can initiate foreclosure when the mortgage is defaulted. These sales are typically cash-only, and prospective buyers may need to register and provide a deposit.
+
+1.7.- Recorder Data set with Essential Columns.
+
+We select essential columns on the recorder data set after prior analysis.
+
+```{r message=FALSE, warning=FALSE}
+
+# Select necessary columns
+selected_columns <- c("TransactionID", "[ATTOM ID]", "DocumentRecordingStateCode", 
+                      "DocumentRecordingCountyName", "DocumentRecordingJurisdictionName", 
+                      "DocumentRecordingCountyFIPs", "DocumentTypeCode", "RecordingDate", 
+                      "ForeclosureAuctionSale", "QuitclaimFlag", "TransferInfoMultiParcelFlag", 
+                      "ArmsLengthFlag", "TransferAmount", "Grantor1NameFull",
+                      "Grantor1InfoEntityClassification", "Grantee1NameFull",
+                      "Grantee1InfoEntityClassification", "PropertyUseGroup")
+
+# Recorder Data set after prior analysis 
+cleaned_recorder_reduced <- cleaned_recorder |> select(all_of(selected_columns))
+
+# Save the cleaned reduced data set as a .txt file
+write.table(cleaned_recorder_reduced, file = "cleaned_recorder_reduced.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+Step 2.
+
+Analyzing Tax Assessor data.
+
+2.1.- Read Dataset on local disk.
+
+```{r message=FALSE, warning=FALSE}
+
+# Read data in chunks
+combined_assessor <- fread("C:/Users/mcerag1/OneDrive - Louisiana State University/Desktop/HEDONIC/HEDONIC/tax_assessor.txt", sep = "\t", header = TRUE)
+
+```
+
+2.2.- Inspect Dataset of Study Area.
+
+```{r message=FALSE, warning=FALSE}
+
+# Display the first few rows of the dataset
+head(combined_assessor)
+
+# Verify the number of rows and columns
+cat("Number of rows:", nrow(combined_assessor), "\n")
+cat("Number of columns:", ncol(combined_assessor), "\n")
+
+# Check missing values in all dataset
+colSums(is.na(combined_assessor))
+
+#Exploring the dimensions of dataset. 
+dim(combined_assessor)
+
+# Displaying columns names
+variable_names <- names(combined_assessor)
+
+# See types of variables (column)
+str(combined_assessor)
+
+```
+
+2.5.- Assessor Dataset with Essential Columns.
+
+```{r message=FALSE, warning=FALSE}
+
+# Select necessary columns
+selected_columns <- c("SitusStateCode", "[ATTOM ID]", "SitusCounty", "SitusStateCountyFIPS", 
+                      "CBSAName", "CBSACode", "ParcelNumberRaw", "PropertyAddressFull", 
+                      "PropertyAddressCity", "PropertyAddressZIP",
+                      "PropertyLatitude", "PropertyLongitude", "PartyOwner1NameFull", 
+                      "OwnerTypeDescription1",
+                       "YearBuilt", "PropertyUseGroup", "AssessorLastSaleDate", 
+                      "AssessorLastSaleAmount",
+                      "AssessorPriorSaleDate", "AssessorPriorSaleAmount", 
+                      "AreaBuilding", "AreaGross", "Area1stFloor",
+                      "Area2ndFloor", "AreaUpperFloors", "AreaLotAcres", 
+                      "AreaLotSF", "AreaLotDepth", "AreaLotWidth",
+                      "BathCount", "BathPartialCount", "BedroomsCount", 
+                      "RoomsCount", "StoriesCount", "ParkingSpaceCount", 
+                      "Pool", "PoolArea")
+
+# Assessor Data set after prior analysis 
+cleaned_assessor_reduced <- combined_assessor |> select(all_of(selected_columns))
+
+# Save the cleaned reduced data set as a .txt file
+write.table(cleaned_assessor_reduced, file = "cleaned_recorder_reduced.txt", 
+            sep = "\t", row.names = FALSE, col.names = TRUE)
+
+```
+
+Step 3.
+
+3.1.- Merge cleaned_recorder_reduced with cleaned_assessor_reduced
+
+```{r message=FALSE, warning=FALSE}
+
+# Select the specific columns 
+selected_columns_assessor <- c("PropertyAddressFull", "[ATTOM ID]",
+                      "PropertyLatitude", "PropertyLongitude", "PartyOwner1NameFull",
+                      "YearBuilt", "AssessorLastSaleDate", 
+                      "AssessorLastSaleAmount",
+                      "AssessorPriorSaleDate", "AssessorPriorSaleAmount", 
+                      "AreaBuilding", "AreaGross", "Area1stFloor",
+                      "Area2ndFloor", "AreaUpperFloors", "AreaLotAcres", 
+                      "AreaLotSF", "AreaLotDepth", "AreaLotWidth",
+                      "BathCount", "BathPartialCount", "BedroomsCount", 
+                      "RoomsCount", "StoriesCount", "ParkingSpaceCount", 
+                      "Pool", "PoolArea")
+cleaned_assessor_reduced_selected <- cleaned_assessor_reduced |>
+  select(selected_columns_assessor)
+
+# Merge the datasets using common columns. 
+merged_RecAss <- cleaned_recorder_reduced |>
+  left_join(cleaned_assessor_reduced_selected, by = c("[ATTOM ID]"))
+
+# Verify the number of rows and columns
+cat("Number of rows:", nrow(merged_RecAss), "\n")
+cat("Number of columns:", ncol(merged_RecAss), "\n")
+
+```
+
+3.2.- Dealing with missing data on merged dataset.
+
+I have a dataset that contains many columns but i would like to group dataset by state and county after giving me a summary of each column.
+
+library(tidyverse)
+
+# Assuming your dataset is named "data"
+
+summary_data \<- data %\>% group_by(State, County) %\>% summarise(across(everything(), list( mean = \~ mean(., na.rm = TRUE), \# Calculates mean (ignores NA) sum = \~ sum(., na.rm = TRUE), \# Calculates sum (ignores NA) min = \~ min(., na.rm = TRUE), \# Minimum value max = \~ max(., na.rm = TRUE) \# Maximum value ), .names = "{col}\_{fn}"))
+
+View the summary dataset
+
+print(summary_data)
