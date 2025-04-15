@@ -369,14 +369,4 @@ cat("Number of columns:", ncol(merged_RecAss), "\n")
 
 3.2.- Dealing with missing data on merged dataset.
 
-I have a dataset that contains many columns but i would like to group dataset by state and county after giving me a summary of each column.
 
-library(tidyverse)
-
-# Assuming your dataset is named "data"
-
-summary_data \<- data %\>% group_by(State, County) %\>% summarise(across(everything(), list( mean = \~ mean(., na.rm = TRUE), \# Calculates mean (ignores NA) sum = \~ sum(., na.rm = TRUE), \# Calculates sum (ignores NA) min = \~ min(., na.rm = TRUE), \# Minimum value max = \~ max(., na.rm = TRUE) \# Maximum value ), .names = "{col}\_{fn}"))
-
-View the summary dataset
-
-print(summary_data)
